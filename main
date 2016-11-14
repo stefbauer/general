@@ -1,0 +1,218 @@
+# Pivotaltracker API token, can be found in the profile page
+$apiKey = "APIKEY"
+# Pivotaltracker Project number
+$pivotalProject = "ProjectNumber"
+
+# Release milestones to collect the userstory between
+$releaseFrom = "Release 1.0.0"
+$releaseUntil = "Release 1.0.1"
+$releaseNumber = "1.0.1"
+
+# Release notes excel file
+$releaseNotesSheet = "D:\Temp\Demo-release-notes.xlsx"
+
+# API call for the milestones
+$url = "https://www.pivotaltracker.com/services/v5/projects/" + $pivotalProject + "/stories?&filter=story_type%3Arelease"
+$releases = Invoke-RestMethod -Uri $url -Header @{"X-TrackerToken" = "$apiKey"}
+
+# Create array for the found releases
+$releaseIds =@()
+foreach ($release in $releases)
+{
+	if ($release.Name -eq $releaseFrom -Or $release.Name -eq $releaseUntil)
+	{
+		$releaseIds = $releaseIds + $release.id
+	}
+}
+Write-Host "Number of releases:" $releaseIds.Count
+
+# Check if excel sheet can be accessed
+If (Test-Path -Path $releaseNotesSheet)
+{
+	# Create the excel object and opening the excel sheet
+	$Excel = New-Object -Com Excel.Application
+	$Excel.Visible = $True # Set to false to edit excel sheet in the background
+	$WorkBook = $Excel.Workbooks.Open("$releaseNotesSheet")
+	$WorkSheet = $WorkBook.Worksheets.Item(1)
+} 
+Else
+{
+	Write-Host "Cannot access:" $releaseNotesSheet
+	Timeout 10
+	Exit(2)
+}
+
+# Create array with existing PivotalIDs
+$PivotalIDs =@()
+$i = 2
+$beginRows = $WorkSheet.UsedRange.Rows.Count
+Write-Host "Collecting existing items"
+do
+{
+	$value = $worksheet.cells.item($i,2).Text
+	if ($value -ne "" -Or $value -ne "PivotalID")
+	{
+		$PivotalIDs = $PivotalIDs + $value
+	}
+	$i++
+} while ($i -le $beginRows)
+
+# Check for amount of releases in the array (should be only two)
+if ($releaseIds -le 1)
+{
+	Write-Host "Cannot find the specified releases"
+	Timeout 10
+	Exit(3)
+} 
+else
+{
+	# API call for the userstories between selected milestones
+	$url = "https://www.pivotaltracker.com/services/v5/projects/" + $pivotalProject + "/stories?after_story_id=" + $releaseIds[0] + "&before_story_id=" + $releaseIds[1]
+	$userStories = Invoke-RestMethod -Uri $url -Header @{"X-TrackerToken" = "$apiKey"}
+	
+	# Array for blocked labels
+	$blockedLabels = @()
+	$blockedLabels = $blockedLabels + "note"
+	$blockedLabels = $blockedLabels + "bug"
+	$blockedLabels = $blockedLabels + "timebox"
+
+	foreach ($userStory in $userStories)
+	{
+		# Display the ID of the selected user story
+		Write-Host "Working on user story:" $userstory.id -NoNewline
+		
+		# Check if userstoryid already is added
+		$addItem = $true
+		foreach ($id in $PivotalIDs)
+		{
+			if ($id -eq $userStory.id)
+			{
+				# Yes it is!
+				$addItem = $false
+				break
+			}
+		}
+		
+		# Add item is not already exists
+		if($addItem)
+		{
+			# Only add when the story type is a feature of a bug
+			if ($userStory.story_type -eq "feature" -Or $userStory.story_type -eq "bug")
+			{
+				# Column format
+				# 1,		2,			3,					4,		5,			6,		7
+				# Version,	PivotalID,	Pivotal subject,	Type,	Component,	Public,	Description	
+				
+				# Check for amount of rows in the excel sheet
+				$rows = $WorkSheet.UsedRange.Rows.Count + 1
+				
+				# Add the release number to the column 1
+				$worksheet.cells.item($rows,1) = $releaseNumber
+				
+				# Add user pivotal ID and hyperlink url in column 2
+				$worksheet.cells.item($rows,2) = $userStory.id
+				$hyperlinkCell = "B" + $rows
+				$hyperlinkCell = $worksheet.Range($hyperlinkCell)
+				$worksheet.Hyperlinks.Add($hyperlinkCell, $userStory.url) | Out-Null
+				
+				# Add the pivotal subject to column 3
+				$worksheet.cells.item($rows,3) = $userStory.Name
+				
+				# Add the type to column 4
+				$worksheet.cells.item($rows,4) = $userStory.story_type
+				
+				# Set default public note to false
+				$publicNote = $false
+				
+				# Create the empty component string for all the labels
+				$compnentString = ""
+				
+				# Go into the label loop when user story contains labels
+				if ($userStory.labels.count -gt 0)
+				{
+					# Loop trough the labels
+					foreach ($label in $userStory.labels)
+					{
+						# When label is equal to note set the public note to true
+						if ($label.Name -eq "note")
+						{
+							$publicNote = $true
+						}
+						
+						# Set the default for adding a label to true
+						$addLabel = $true
+						
+						# Loop trough the blocked labels
+						foreach ($blockedLabel in $blockedLabels)
+						{
+							# If the label is equal to the blocked label set the adding a label to false
+							if ($blockedLabel -eq $label.Name)
+							{
+								$addLabel = $false
+							}
+						}
+						
+						# If adding the label is true add label to the component string
+						if ($addLabel)
+						{
+							$compnentString = $compnentString + $label.Name + ", "
+						}
+					}
+				}
+				
+				# If the component string contains characters trim the last , <space>
+				if ($compnentString.length -gt 0)
+				{
+					$compnentString = $compnentString.Substring(0,$compnentString.Length-2)
+				}
+				
+				# Add the component string to column 5
+				$worksheet.cells.item($rows,5) = $compnentString
+				
+				# If public note is true add Yes to column 6, if not add No to column 6 and don't add a release note
+				if ($publicNote)
+				{
+					$worksheet.cells.item($rows,6) = "Yes"
+					
+					# Collect the description for a public release note
+					$releaseNotePosition = $userStory.description.ToLower().IndexOf("release note:")
+					
+					# When the release note is found add the release note to column 7
+					if ($releaseNotePosition -ne "-1")	
+					{
+						$releaseNote = $userStory.description.Substring($releaseNotePosition +14)
+						$worksheet.cells.item($rows,7) = $releaseNote
+					}	
+				}
+				else
+				{
+					$worksheet.cells.item($rows,6) = "No"
+				}
+			}
+			else
+			{
+				Write-Host " - Item is not a feature or a bug"
+				Write-Host ""
+			}
+		}
+		else
+		{
+			Write-Host " - Item already exists"
+			Write-Host ""
+		}
+	}
+
+	# Is no new rows are added don't add release bar
+	if ($beginRows -ne $WorkSheet.UsedRange.Rows.Count)
+	{
+		# Add the Release bar with white text and blue background color
+		$worksheet.cells.item($rows + 1,1) = "Release"
+		$worksheet.cells.item($rows + 1,1).Font.Bold = $true
+		$worksheet.cells.item($rows + 1,1).Font.ColorIndex = 2
+		$worksheet.Cells.Item($rows+1, 1).EntireRow.Interior.ColorIndex = 49
+	}
+	
+	# Save the excel sheet
+	$WorkBook.Save()
+	$Excel.Quit()
+}
